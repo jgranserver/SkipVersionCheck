@@ -1,23 +1,36 @@
 # SkipVersionCheck
 
-A TShock plugin that allows any Terraria client within the **1.4.5.x** family to connect, regardless of exact patch version.
+A TShock plugin that allows Terraria clients on different patch versions to connect to your server, with basic protocol translation to prevent desync.
+
+## Features
+
+- **Version check bypass** — completely bypasses Terraria's built-in version check so clients on different patch versions can connect
+- **Per-client version tracking** — tracks each connected client's release number
+- **Item filtering** — silently filters out item IDs that the server doesn't recognize, preventing crashes and desync from newer-version clients
+- **Future-proof** — accepts any client with release ≥ 279 (v1.4.4.9+), no need to update for each new Terraria patch
 
 ## How It Works
 
 When a client connects, Terraria sends a version string (e.g. `"Terraria316"` for v1.4.5.3). If it doesn't exactly match the server's version, the connection is rejected.
 
-This plugin intercepts the connection packet and, if the client's version falls within the 1.4.5.x release range, rewrites it to match the server — so v1.4.5.0 clients can join a v1.4.5.3 server (and vice versa).
+This plugin intercepts the `ConnectRequest` packet and, if the client's version is within the supported range, **handles the connection handshake itself** — bypassing Terraria's version check entirely and manually advancing the connection state.
+
+For cross-version clients, the plugin also:
+- Filters `PlayerSlot` and `ItemDrop` packets to replace unknown item IDs with empty (0)
+- Tracks client versions to enable version-aware packet handling
 
 ## Supported Versions
 
-Any Terraria release in the **1.4.5.x** family, including:
+Any Terraria release ≥ 279, including:
 
 | Release | Version   |
 |---------|-----------|
+| 279     | v1.4.4.9  |
 | 315     | v1.4.5.0  |
 | 316     | v1.4.5.3  |
+| 317+    | v1.4.5.5+ |
 
-Clients outside this range are rejected normally.
+Future versions are automatically accepted — no plugin update required.
 
 ## Installation
 
@@ -27,5 +40,10 @@ Clients outside this range are rejected normally.
 
 ## Requirements
 
-- TShock 6.0.0+ (for Terraria 1.4.5.x)
+- TShock 5.x / 6.0.0+ (for Terraria 1.4.4.9+)
 - .NET 9.0
+
+## Limitations
+
+- **Protocol differences**: While the plugin bypasses the version check and filters items, it cannot translate fundamental protocol changes between major Terraria versions. It works best between minor patch versions (e.g. 1.4.5.3 ↔ 1.4.5.5) where the packet format is identical.
+- **New items**: Items that only exist in a newer version will be silently dropped when sent to the server. Players won't lose them client-side, but the server won't process them.
