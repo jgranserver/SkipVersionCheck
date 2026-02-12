@@ -12,18 +12,28 @@ namespace SkipVersionCheck;
 /// <summary>
 /// Allows any Terraria client within a compatible release range to connect
 /// by bypassing the built-in version check and manually handling the
-/// connection handshake. Also provides basic protocol translation
-/// (item filtering, journey mode fix) for cross-version play.
+/// connection handshake. Provides protocol translation (NetModule filtering,
+/// item filtering, journey mode fix) for cross-version play.
 /// </summary>
 [ApiVersion(2, 1)]
 public class SkipVersionCheck : TerrariaPlugin
 {
     // Accept any client with release >= this value.
-    private const int MinSupportedRelease = 279;
+    private const int MinSupportedRelease = 269;
 
     // Friendly labels for logging.
     private static readonly Dictionary<int, string> KnownVersions = new()
     {
+        { 269, "v1.4.4" },
+        { 270, "v1.4.4.1" },
+        { 271, "v1.4.4.2" },
+        { 272, "v1.4.4.3" },
+        { 273, "v1.4.4.4" },
+        { 274, "v1.4.4.5" },
+        { 275, "v1.4.4.6" },
+        { 276, "v1.4.4.7" },
+        { 277, "v1.4.4.8" },
+        { 278, "v1.4.4.8.1" },
         { 279, "v1.4.4.9" },
         { 315, "v1.4.5.0" },
         { 316, "v1.4.5.3" },
@@ -31,27 +41,55 @@ public class SkipVersionCheck : TerrariaPlugin
         { 318, "v1.4.5.5" },
     };
 
+    // Max item IDs per release version (for outgoing packet filtering).
+    private static readonly Dictionary<int, int> MaxItems = new()
+    {
+        { 269, 5453 },
+        { 270, 5453 },
+        { 271, 5453 },
+        { 272, 5453 },
+        { 273, 5453 },
+        { 274, 5456 },
+        { 275, 5456 },
+        { 276, 5456 },
+        { 277, 5456 },
+        { 278, 5456 },
+        { 279, 5456 },
+        { 315, 6145 },
+        { 316, 6145 },
+        { 317, 6145 },
+        { 318, 6145 },
+    };
+
     // Track each client's release number. -1 = same as server, 0 = not connected.
     private readonly int[] _clientVersions = new int[Main.maxPlayers + 1];
 
-    // The server's max item ID (items with ID >= this are unknown to the server).
+    // The server's max item ID.
     private int _serverMaxItemId;
+
+    // Singleton instance for NetModuleHandler to access.
+    public static SkipVersionCheck? Instance { get; private set; }
 
     public override string Name => "SkipVersionCheck";
     public override string Author => "Jgran";
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
-        "with basic protocol translation for cross-version play.";
-    public override Version Version => new(2, 6, 0);
+        "with full protocol translation for cross-version play.";
+    public override Version Version => new(2, 7, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
         Order = -1;
+        Instance = this;
     }
 
     public override void Initialize()
     {
-        // Run first to intercept ConnectRequest before TShock rejects it.
+        // Hook NetManager for outgoing NetModule packet filtering
+        On.Terraria.Net.NetManager.Broadcast_NetPacket_int += NetModuleHandler.OnBroadcast;
+        On.Terraria.Net.NetManager.SendToClient += NetModuleHandler.OnSendToClient;
+
+        // Hook incoming packets (run first to intercept before TShock)
         ServerApi.Hooks.NetGetData.Register(this, OnGetData, int.MinValue);
         ServerApi.Hooks.GamePostInitialize.Register(this, OnPostInitialize);
         ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
@@ -61,6 +99,9 @@ public class SkipVersionCheck : TerrariaPlugin
     {
         if (disposing)
         {
+            On.Terraria.Net.NetManager.Broadcast_NetPacket_int -= NetModuleHandler.OnBroadcast;
+            On.Terraria.Net.NetManager.SendToClient -= NetModuleHandler.OnSendToClient;
+
             ServerApi.Hooks.NetGetData.Deregister(this, OnGetData);
             ServerApi.Hooks.GamePostInitialize.Deregister(this, OnPostInitialize);
             ServerApi.Hooks.ServerLeave.Deregister(this, OnLeave);
@@ -71,10 +112,16 @@ public class SkipVersionCheck : TerrariaPlugin
     private void OnPostInitialize(EventArgs args)
     {
         _serverMaxItemId = ItemID.Count;
-        TShock.Log.ConsoleInfo(
-            $"[SkipVersionCheck] Active — Server curRelease: {Main.curRelease}, " +
-            $"versionNumber: {Main.versionNumber}, maxItemId: {_serverMaxItemId}. " +
-            $"Accepting any client with release >= {MinSupportedRelease}.");
+
+        StringBuilder sb = new StringBuilder()
+            .Append("[SkipVersionCheck] Active — ")
+            .Append($"Server curRelease: {Main.curRelease}, ")
+            .Append($"versionNumber: {Main.versionNumber}, ")
+            .Append($"maxItemId: {_serverMaxItemId}\n")
+            .Append("[SkipVersionCheck] Whitelisted versions: ")
+            .Append(string.Join(", ", KnownVersions.Values));
+
+        TShock.Log.ConsoleInfo(sb.ToString());
     }
 
     private void OnLeave(LeaveEventArgs args)
@@ -85,7 +132,23 @@ public class SkipVersionCheck : TerrariaPlugin
         }
     }
 
-    // ───────────────────── Incoming packets (client → server) ─────────────────────
+    // ───────── Public accessors for NetModuleHandler ─────────
+
+    /// <summary>Get the stored version for a connected client.</summary>
+    public int GetClientVersion(int playerIndex)
+    {
+        if (playerIndex < 0 || playerIndex >= _clientVersions.Length)
+            return 0;
+        return _clientVersions[playerIndex];
+    }
+
+    /// <summary>Get the max item ID that a client version supports.</summary>
+    public int GetMaxItemsForVersion(int clientVersion)
+    {
+        return MaxItems.TryGetValue(clientVersion, out int max) ? max : _serverMaxItemId;
+    }
+
+    // ───────────────────── Incoming packets ─────────────────────
 
     private void OnGetData(GetDataEventArgs args)
     {
@@ -112,7 +175,8 @@ public class SkipVersionCheck : TerrariaPlugin
     /// Bypass the version check for cross-version clients by manually handling
     /// the connection handshake. We replicate what vanilla Terraria does:
     /// 1. Set connection state to 1
-    /// 2. Fire the ServerConnect hook (so TShock initializes SSC, bans, etc.)
+    /// 2. Construct a proper ConnectRequest packet with the server's version
+    ///    using PacketFactory and copy it into the buffer
     /// 3. Send password request or continue-connecting packet
     /// 4. Mark packet as handled so vanilla doesn't reject the version
     /// </summary>
@@ -156,20 +220,27 @@ public class SkipVersionCheck : TerrariaPlugin
             ? ver : $"release {clientRelease}";
 
         TShock.Log.ConsoleInfo(
-            $"[SkipVersionCheck] Bypassing version check for client (index {playerIndex}) " +
-            $"{clientVersion} ({label}). Server curRelease={Main.curRelease}.");
+            $"[SkipVersionCheck] Cross-version client (index {playerIndex}) " +
+            $"{clientVersion} ({label}) connecting to server {Main.curRelease}.");
 
-        // --- Replicate vanilla's ConnectRequest handling ---
-
-        // Step 1: Set connection state
+        // --- Step 1: Set connection state ---
         Netplay.Clients[playerIndex].State = 1;
 
-        // Note: We can't easily invoke ServerApi.Hooks.ServerConnect because
-        // ConnectEventArgs.Who is read-only in this TShock version.
-        // TShock's ServerJoin and other hooks will still fire during the
-        // subsequent connection flow (PlayerInfo, etc.).
+        // --- Step 2: Construct a ConnectRequest with the server's version ---
+        // Use PacketFactory to build a proper packet matching the Crossplay approach.
+        byte[] connectRequest = new PacketFactory()
+            .SetType(1) // PacketTypes.ConnectRequest
+            .PackString($"Terraria{Main.curRelease}")
+            .GetByteData();
 
-        // Step 3: Send password request or continue-connecting
+        // Copy the rewritten packet into the buffer at the packet header start
+        Buffer.BlockCopy(connectRequest, 0, args.Msg.readBuffer, args.Index - 3, connectRequest.Length);
+
+        TShock.Log.ConsoleInfo(
+            $"[SkipVersionCheck] Rewrote packet buffer: {clientVersion} => Terraria{Main.curRelease} " +
+            $"({connectRequest.Length} bytes at offset {args.Index - 3}).");
+
+        // --- Step 3: Send continue-connecting ---
         if (Netplay.ServerPassword != null && Netplay.ServerPassword.Length > 0)
         {
             NetMessage.SendData(37, playerIndex);
@@ -183,7 +254,7 @@ public class SkipVersionCheck : TerrariaPlugin
                 $"[SkipVersionCheck] No password. Sent ContinueConnecting to client {playerIndex}.");
         }
 
-        // Step 4: Prevent vanilla from processing (it would reject the version)
+        // --- Step 4: Bypass vanilla processing ---
         args.Handled = true;
     }
 
@@ -210,6 +281,10 @@ public class SkipVersionCheck : TerrariaPlugin
                 TShock.Log.ConsoleInfo(
                     $"[SkipVersionCheck] Enabled journey mode flag for cross-version client {who}");
                 gameModeFlags |= 8;
+                if (Main.ServerSideCharacter)
+                {
+                    NetMessage.SendData(4, who, -1, null, who);
+                }
             }
         }
         else
