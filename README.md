@@ -7,7 +7,7 @@ A TShock plugin that allows Terraria clients on different patch versions to conn
 - **Version check bypass** — completely bypasses Terraria's built-in version check so clients on different patch versions can connect
 - **Per-client version tracking** — tracks each connected client's release number
 - **Item filtering** — silently filters out item IDs that the server doesn't recognize, preventing crashes and desync from newer-version clients
-- **Future-proof** — accepts any client with release ≥ 279 (v1.4.4.9+), no need to update for each new Terraria patch
+- **Future-proof** — accepts any client with release ≥ 269 (v1.4.4+), no need to update for each new Terraria patch
 
 ## How It Works
 
@@ -18,17 +18,20 @@ This plugin intercepts the `ConnectRequest` packet and, if the client's version 
 For cross-version clients, the plugin also:
 - Filters `PlayerSlot` and `ItemDrop` packets to replace unknown item IDs with empty (0)
 - Tracks client versions to enable version-aware packet handling
+- Fixes Journey mode sync for cross-version clients
 
 ## Supported Versions
 
-Any Terraria release ≥ 279, including:
+Any Terraria release ≥ 269, including:
 
 | Release | Version   |
 |---------|-----------|
+| 269     | v1.4.4    |
 | 279     | v1.4.4.9  |
 | 315     | v1.4.5.0  |
 | 316     | v1.4.5.3  |
-| 317+    | v1.4.5.5+ |
+| 317     | v1.4.5.5  |
+| 318+    | v1.4.5.5+ |
 
 Future versions are automatically accepted — no plugin update required.
 
@@ -40,7 +43,7 @@ Future versions are automatically accepted — no plugin update required.
 
 ## Requirements
 
-- TShock 5.x / 6.0.0+ (for Terraria 1.4.4.9+)
+- TShock 5.x / 6.0.0+ (for Terraria 1.4.4+)
 - .NET 9.0
 
 ## Limitations
