@@ -11,10 +11,10 @@ namespace SkipVersionCheck;
 
 /// <summary>
 /// Allows any Terraria client within a compatible release range to connect
-/// by rewriting the version in the packet buffer so TShock handles the
+/// by rewriting the version string in the packet buffer so TShock handles the
 /// connection normally (SSC, auth, state all initialize correctly).
-/// Also provides basic protocol translation (item filtering) so that
-/// clients on nearby patch versions can play without desync.
+/// Also provides basic protocol translation (item filtering, journey mode fix)
+/// so that clients on nearby patch versions can play without desync.
 /// </summary>
 [ApiVersion(2, 1)]
 public class SkipVersionCheck : TerrariaPlugin
@@ -43,19 +43,15 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with basic protocol translation for cross-version play.";
-    public override Version Version => new(2, 3, 0);
+    public override Version Version => new(2, 4, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
-        // Load early to ensure we can intercept before other plugins.
         Order = -1;
     }
 
     public override void Initialize()
     {
-        // Use int.MaxValue priority so our handler runs LAST in the NetGetData chain.
-        // This is fine because we modify the readBuffer in-place before vanilla code
-        // processes it (vanilla runs after ALL handlers finish).
         ServerApi.Hooks.NetGetData.Register(this, OnGetData, int.MaxValue);
         ServerApi.Hooks.GamePostInitialize.Register(this, OnPostInitialize);
         ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
@@ -113,13 +109,12 @@ public class SkipVersionCheck : TerrariaPlugin
     }
 
     /// <summary>
-    /// Rewrite the entire ConnectRequest packet in the buffer to use the server's
-    /// version, then let TShock and vanilla handle it normally.
-    /// This ensures TShock fully initializes the player (SSC, auth, state).
-    ///
-    /// Following the approach used by the Crossplay plugin:
-    /// - Construct a full replacement packet with proper 3-byte header
-    /// - Copy it into readBuffer at args.Index - 3 (header starts there)
+    /// Rewrite the version string in the payload portion of the buffer so that
+    /// vanilla Terraria and TShock see a matching version.
+    /// The payload at args.Index starts with a BinaryWriter-encoded string:
+    ///   [7-bit encoded length][UTF-8 string bytes]
+    /// Since all version strings are "Terraria" + 3 digits (11 chars), the length
+    /// prefix is always 1 byte (0x0B) and the total payload size never changes.
     /// </summary>
     private void HandleConnectRequest(GetDataEventArgs args)
     {
@@ -157,29 +152,17 @@ public class SkipVersionCheck : TerrariaPlugin
             return;
         }
 
-        // --- Construct a full replacement ConnectRequest packet ---
-        // Packet format: [short packetLength] [byte packetType=1] [string versionString]
+        // --- Rewrite the version string directly in the buffer ---
         string serverVersion = "Terraria" + Main.curRelease;
+        byte[] newStringBytes = Encoding.UTF8.GetBytes(serverVersion);
 
-        using var ms = new MemoryStream();
-        using var writer = new BinaryWriter(ms);
+        int offset = args.Index;
 
-        // Reserve 2 bytes for packet length, then write packet type
-        writer.Write((short)0); // placeholder for length
-        writer.Write((byte)PacketTypes.ConnectRequest); // type = 1
-        writer.Write(serverVersion); // BinaryWriter encodes as 7-bit length + UTF-8 bytes
+        // Overwrite the 7-bit length prefix (1 byte for strings < 128 chars)
+        args.Msg.readBuffer[offset] = (byte)newStringBytes.Length;
 
-        // Update the packet length (total bytes including the 2-byte length field)
-        long totalLength = ms.Position;
-        ms.Position = 0;
-        writer.Write((short)totalLength);
-
-        byte[] packetBytes = ms.ToArray();
-
-        // Copy the full packet into readBuffer starting at the packet header position.
-        // args.Index points to the payload (after the 3-byte header).
-        // The header starts at args.Index - 3.
-        Buffer.BlockCopy(packetBytes, 0, args.Msg.readBuffer, args.Index - 3, packetBytes.Length);
+        // Overwrite the string content
+        Buffer.BlockCopy(newStringBytes, 0, args.Msg.readBuffer, offset + 1, newStringBytes.Length);
 
         string label = KnownVersions.TryGetValue(clientRelease, out string? ver)
             ? ver : $"release {clientRelease}";
@@ -189,13 +172,12 @@ public class SkipVersionCheck : TerrariaPlugin
             $"from {clientVersion} ({label}) to {serverVersion}. " +
             $"TShock will handle connect normally.");
 
-        // Do NOT set args.Handled — let TShock process the rewritten packet.
+        // Do NOT set args.Handled — let TShock/vanilla process the rewritten packet.
     }
 
     /// <summary>
     /// Handle PlayerInfo packet for cross-version compatibility.
-    /// If the server is in journey mode, ensure the client's journey flag is set.
-    /// If the server is NOT in journey mode, strip the journey flag from clients.
+    /// Fixes journey mode flag so cross-version clients match the server's game mode.
     /// </summary>
     private void HandlePlayerInfo(GetDataEventArgs args)
     {
@@ -204,12 +186,15 @@ public class SkipVersionCheck : TerrariaPlugin
             return;
 
         // The game mode flags byte is at the end of the PlayerInfo packet payload.
-        // It contains bitflags: bit 0,1 = difficulty, bit 3 = journey mode
-        ref byte gameModeFlags = ref args.Msg.readBuffer[args.Index + args.Length - 1];
+        // Bit 3 (value 8) = journey mode flag.
+        int flagsIndex = args.Index + args.Length - 1;
+        if (flagsIndex < 0 || flagsIndex >= args.Msg.readBuffer.Length)
+            return;
+
+        ref byte gameModeFlags = ref args.Msg.readBuffer[flagsIndex];
 
         if (Main.GameModeInfo.IsJourneyMode)
         {
-            // Server is journey — ensure client has the journey flag
             if ((gameModeFlags & 8) != 8)
             {
                 TShock.Log.ConsoleInfo(
@@ -219,7 +204,6 @@ public class SkipVersionCheck : TerrariaPlugin
         }
         else
         {
-            // Server is NOT journey — strip journey flag if client has it
             if ((gameModeFlags & 8) == 8)
             {
                 TShock.Log.ConsoleInfo(
@@ -231,8 +215,6 @@ public class SkipVersionCheck : TerrariaPlugin
 
     /// <summary>
     /// Filter dropped items with IDs the server doesn't recognize.
-    /// Packet 21 layout: [short id] [single x] [single y] [single vx] [single vy]
-    ///                    [short stacks] [byte prefix] [byte nodelay] [short type]
     /// </summary>
     private void HandleIncomingItemDrop(GetDataEventArgs args)
     {
@@ -240,12 +222,10 @@ public class SkipVersionCheck : TerrariaPlugin
         if (!IsCrossVersionClient(who))
             return;
 
-        // Need at least 22 bytes: 2 + 4 + 4 + 4 + 4 + 2 + 1 + 1 + 2
         if (args.Length < 22)
             return;
 
         int offset = args.Index;
-        // Item type is at offset +20 (2+4+4+4+4+2+1+1)
         int typeOffset = offset + 20;
         short itemType = BitConverter.ToInt16(args.Msg.readBuffer, typeOffset);
 
@@ -260,16 +240,12 @@ public class SkipVersionCheck : TerrariaPlugin
 
     // ───────────────────── Helpers ─────────────────────
 
-    /// <summary>
-    /// Check if a player is a cross-version client (different version from server).
-    /// </summary>
     private bool IsCrossVersionClient(int playerIndex)
     {
         if (playerIndex < 0 || playerIndex >= _clientVersions.Length)
             return false;
 
         int ver = _clientVersions[playerIndex];
-        // 0 = not connected, -1 = same as server
         return ver > 0 && ver != Main.curRelease;
     }
 }
