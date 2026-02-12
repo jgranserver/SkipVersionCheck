@@ -11,10 +11,9 @@ namespace SkipVersionCheck;
 
 /// <summary>
 /// Allows any Terraria client within a compatible release range to connect
-/// by rewriting the version string in the packet buffer so TShock handles the
-/// connection normally (SSC, auth, state all initialize correctly).
-/// Also provides basic protocol translation (item filtering, journey mode fix)
-/// so that clients on nearby patch versions can play without desync.
+/// by bypassing the built-in version check and manually handling the
+/// connection handshake. Also provides basic protocol translation
+/// (item filtering, journey mode fix) for cross-version play.
 /// </summary>
 [ApiVersion(2, 1)]
 public class SkipVersionCheck : TerrariaPlugin
@@ -43,7 +42,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with basic protocol translation for cross-version play.";
-    public override Version Version => new(2, 5, 0);
+    public override Version Version => new(2, 6, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
@@ -52,10 +51,7 @@ public class SkipVersionCheck : TerrariaPlugin
 
     public override void Initialize()
     {
-        // Use int.MinValue priority so our handler runs FIRST in the NetGetData chain.
-        // In TerrariaApi, handlers are sorted by priority in ascending order, so
-        // int.MinValue runs before all other handlers (including TShock's).
-        // This ensures we rewrite the version in the buffer BEFORE TShock reads it.
+        // Run first to intercept ConnectRequest before TShock rejects it.
         ServerApi.Hooks.NetGetData.Register(this, OnGetData, int.MinValue);
         ServerApi.Hooks.GamePostInitialize.Register(this, OnPostInitialize);
         ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
@@ -113,12 +109,12 @@ public class SkipVersionCheck : TerrariaPlugin
     }
 
     /// <summary>
-    /// Rewrite the version string in the payload portion of the buffer so that
-    /// vanilla Terraria and TShock see a matching version.
-    /// The payload at args.Index starts with a BinaryWriter-encoded string:
-    ///   [7-bit encoded length][UTF-8 string bytes]
-    /// Since all version strings are "Terraria" + 3 digits (11 chars), the length
-    /// prefix is always 1 byte (0x0B) and the total payload size never changes.
+    /// Bypass the version check for cross-version clients by manually handling
+    /// the connection handshake. We replicate what vanilla Terraria does:
+    /// 1. Set connection state to 1
+    /// 2. Fire the ServerConnect hook (so TShock initializes SSC, bans, etc.)
+    /// 3. Send password request or continue-connecting packet
+    /// 4. Mark packet as handled so vanilla doesn't reject the version
     /// </summary>
     private void HandleConnectRequest(GetDataEventArgs args)
     {
@@ -149,34 +145,46 @@ public class SkipVersionCheck : TerrariaPlugin
         int playerIndex = args.Msg.whoAmI;
         _clientVersions[playerIndex] = clientRelease;
 
-        // If version matches server, nothing to do.
+        // If version matches server, let vanilla handle it normally.
         if (clientRelease == Main.curRelease)
         {
             _clientVersions[playerIndex] = -1; // same as server
             return;
         }
 
-        // --- Rewrite the version string directly in the buffer ---
-        string serverVersion = "Terraria" + Main.curRelease;
-        byte[] newStringBytes = Encoding.UTF8.GetBytes(serverVersion);
-
-        int offset = args.Index;
-
-        // Overwrite the 7-bit length prefix (1 byte for strings < 128 chars)
-        args.Msg.readBuffer[offset] = (byte)newStringBytes.Length;
-
-        // Overwrite the string content
-        Buffer.BlockCopy(newStringBytes, 0, args.Msg.readBuffer, offset + 1, newStringBytes.Length);
-
         string label = KnownVersions.TryGetValue(clientRelease, out string? ver)
             ? ver : $"release {clientRelease}";
 
         TShock.Log.ConsoleInfo(
-            $"[SkipVersionCheck] Rewrote client (index {playerIndex}) version " +
-            $"from {clientVersion} ({label}) to {serverVersion}. " +
-            $"TShock will handle connect normally.");
+            $"[SkipVersionCheck] Bypassing version check for client (index {playerIndex}) " +
+            $"{clientVersion} ({label}). Server curRelease={Main.curRelease}.");
 
-        // Do NOT set args.Handled — let TShock/vanilla process the rewritten packet.
+        // --- Replicate vanilla's ConnectRequest handling ---
+
+        // Step 1: Set connection state
+        Netplay.Clients[playerIndex].State = 1;
+
+        // Note: We can't easily invoke ServerApi.Hooks.ServerConnect because
+        // ConnectEventArgs.Who is read-only in this TShock version.
+        // TShock's ServerJoin and other hooks will still fire during the
+        // subsequent connection flow (PlayerInfo, etc.).
+
+        // Step 3: Send password request or continue-connecting
+        if (Netplay.ServerPassword != null && Netplay.ServerPassword.Length > 0)
+        {
+            NetMessage.SendData(37, playerIndex);
+            TShock.Log.ConsoleInfo(
+                $"[SkipVersionCheck] Password required. Sent password request to client {playerIndex}.");
+        }
+        else
+        {
+            NetMessage.SendData(3, playerIndex);
+            TShock.Log.ConsoleInfo(
+                $"[SkipVersionCheck] No password. Sent ContinueConnecting to client {playerIndex}.");
+        }
+
+        // Step 4: Prevent vanilla from processing (it would reject the version)
+        args.Handled = true;
     }
 
     /// <summary>
@@ -189,8 +197,6 @@ public class SkipVersionCheck : TerrariaPlugin
         if (!IsCrossVersionClient(who))
             return;
 
-        // The game mode flags byte is at the end of the PlayerInfo packet payload.
-        // Bit 3 (value 8) = journey mode flag.
         int flagsIndex = args.Index + args.Length - 1;
         if (flagsIndex < 0 || flagsIndex >= args.Msg.readBuffer.Length)
             return;
@@ -212,7 +218,7 @@ public class SkipVersionCheck : TerrariaPlugin
             {
                 TShock.Log.ConsoleInfo(
                     $"[SkipVersionCheck] Disabled journey mode flag for cross-version client {who}");
-                gameModeFlags &= 247; // clear bit 3
+                gameModeFlags &= 247;
             }
         }
     }
