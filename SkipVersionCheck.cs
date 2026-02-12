@@ -43,7 +43,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with basic protocol translation for cross-version play.";
-    public override Version Version => new(2, 4, 0);
+    public override Version Version => new(2, 5, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
@@ -52,7 +52,11 @@ public class SkipVersionCheck : TerrariaPlugin
 
     public override void Initialize()
     {
-        ServerApi.Hooks.NetGetData.Register(this, OnGetData, int.MaxValue);
+        // Use int.MinValue priority so our handler runs FIRST in the NetGetData chain.
+        // In TerrariaApi, handlers are sorted by priority in ascending order, so
+        // int.MinValue runs before all other handlers (including TShock's).
+        // This ensures we rewrite the version in the buffer BEFORE TShock reads it.
+        ServerApi.Hooks.NetGetData.Register(this, OnGetData, int.MinValue);
         ServerApi.Hooks.GamePostInitialize.Register(this, OnPostInitialize);
         ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
     }
