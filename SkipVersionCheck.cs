@@ -13,8 +13,8 @@ namespace SkipVersionCheck;
 /// <summary>
 /// Allows any Terraria client within a compatible release range to connect
 /// by bypassing the built-in version check entirely, and provides basic
-/// protocol translation (item filtering, spawn-sync fix) so that clients
-/// on nearby patch versions can play without desync.
+/// protocol translation (item filtering) so that clients on nearby patch
+/// versions can play without desync.
 /// </summary>
 [ApiVersion(2, 1)]
 public class SkipVersionCheck : TerrariaPlugin
@@ -43,7 +43,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with basic protocol translation for cross-version play.";
-    public override Version Version => new(2, 0, 0);
+    public override Version Version => new(2, 1, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
@@ -101,17 +101,9 @@ public class SkipVersionCheck : TerrariaPlugin
                 HandleConnectRequest(args);
                 break;
 
-            case PacketTypes.PlayerSlot:
-                HandleIncomingPlayerSlot(args);
-                break;
-
             case PacketTypes.ItemDrop:
                 HandleIncomingItemDrop(args);
                 break;
-
-                // case PacketTypes.PlayerSpawn:
-                //     HandleIncomingSpawn(args);
-                //     break;
         }
     }
 
@@ -183,34 +175,7 @@ public class SkipVersionCheck : TerrariaPlugin
         args.Handled = true;
     }
 
-    /// <summary>
-    /// Filter item slots with IDs the server doesn't recognize.
-    /// Packet 5 layout: [byte playerid] [short slot] [short stack] [byte prefix] [short type]
-    /// </summary>
-    private void HandleIncomingPlayerSlot(GetDataEventArgs args)
-    {
-        int who = args.Msg.whoAmI;
-        if (!IsCrossVersionClient(who))
-            return;
 
-        // Need at least 8 bytes: 1 + 2 + 2 + 1 + 2
-        if (args.Length < 8)
-            return;
-
-        int offset = args.Index;
-        // Item type is at offset +6 (1 byte playerid + 2 short slot + 2 short stack + 1 byte prefix)
-        int typeOffset = offset + 6;
-        short itemType = BitConverter.ToInt16(args.Msg.readBuffer, typeOffset);
-
-        if (itemType >= _serverMaxItemId)
-        {
-            TShock.Log.ConsoleDebug(
-                $"[SkipVersionCheck] Filtered unsupported item {itemType} from client {who} (PlayerSlot)");
-            // Replace with 0 (empty)
-            args.Msg.readBuffer[typeOffset] = 0;
-            args.Msg.readBuffer[typeOffset + 1] = 0;
-        }
-    }
 
     /// <summary>
     /// Filter dropped items with IDs the server doesn't recognize.
@@ -241,31 +206,7 @@ public class SkipVersionCheck : TerrariaPlugin
         }
     }
 
-    /// <summary>
-    /// Fix the forced SSC spawn teleport for cross-version clients.
-    /// When SSC is enabled, TShock forces a teleport to the server-saved spawn
-    /// because spawnSynced is false. We set it to true for cross-version players
-    /// to prevent the forced teleport on initial join.
-    /// </summary>
-    // private void HandleIncomingSpawn(GetDataEventArgs args)
-    // {
-    //     int who = args.Msg.whoAmI;
-    //     if (!IsCrossVersionClient(who))
-    //         return;
 
-    //     var player = TShock.Players[who];
-    //     if (player == null)
-    //         return;
-
-    //     // Only on initial connection spawn (state == 3)
-    //     if (player.State == 3 && !player.spawnSynced && Main.ServerSideCharacter)
-    //     {
-    //         player.spawnSynced = true;
-    //         TShock.Log.ConsoleInfo(
-    //             $"[SkipVersionCheck] Set spawnSynced=true for cross-version client {who} " +
-    //             $"({player.Name}) to prevent forced SSC teleport.");
-    //     }
-    // }
 
     // ───────────────────── Outgoing packets (server → client) ─────────────────────
 
