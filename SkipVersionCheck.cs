@@ -286,7 +286,7 @@ public class SkipVersionCheck : TerrariaPlugin
 
         ref byte gameModeFlags = ref args.Msg.readBuffer[flagsIndex];
 
-        if (Main.GameModeInfo.IsJourneyMode)
+        if (Main.GameMode == GameModeID.Creative)
         {
             if ((gameModeFlags & 8) != 8)
             {
