@@ -6,21 +6,6 @@
     <Version>2.7.0</Version>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="UnrealMultiple.TShock-Beta" Version="6.0.0"/>
-  </ItemGroup>
-  <ItemGroup>
-    <!-- Direct references to TShock server DLLs for MonoMod hooks (On.Terraria.*) -->
-    <Reference Include="TerrariaServer">
-      <HintPath>C:\Users\Admin\Documents\TShock\bin\TerrariaServer.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="OTAPI">
-      <HintPath>C:\Users\Admin\Documents\TShock\bin\OTAPI.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="OTAPI.Runtime">
-      <HintPath>C:\Users\Admin\Documents\TShock\bin\OTAPI.Runtime.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <PackageReference Include="TShock" Version="5.9.9" />
   </ItemGroup>
 </Project>
