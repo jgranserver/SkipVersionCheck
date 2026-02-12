@@ -3,7 +3,6 @@ using System.Text;
 
 using Terraria;
 using Terraria.ID;
-using Terraria.Localization;
 using TerrariaApi.Server;
 
 using TShockAPI;
@@ -43,7 +42,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with basic protocol translation for cross-version play.";
-    public override Version Version => new(2, 1, 0);
+    public override Version Version => new(2, 2, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
@@ -54,7 +53,6 @@ public class SkipVersionCheck : TerrariaPlugin
     public override void Initialize()
     {
         ServerApi.Hooks.NetGetData.Register(this, OnGetData, int.MaxValue);
-        ServerApi.Hooks.NetSendData.Register(this, OnSendData);
         ServerApi.Hooks.GamePostInitialize.Register(this, OnPostInitialize);
         ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
     }
@@ -64,7 +62,6 @@ public class SkipVersionCheck : TerrariaPlugin
         if (disposing)
         {
             ServerApi.Hooks.NetGetData.Deregister(this, OnGetData);
-            ServerApi.Hooks.NetSendData.Deregister(this, OnSendData);
             ServerApi.Hooks.GamePostInitialize.Deregister(this, OnPostInitialize);
             ServerApi.Hooks.ServerLeave.Deregister(this, OnLeave);
         }
@@ -108,7 +105,9 @@ public class SkipVersionCheck : TerrariaPlugin
     }
 
     /// <summary>
-    /// Bypass the version check entirely for supported clients.
+    /// Rewrite the client's version string in the packet buffer to match the
+    /// server's curRelease, then let TShock handle the connect normally.
+    /// This ensures TShock fully initializes the player (SSC, auth, state).
     /// </summary>
     private void HandleConnectRequest(GetDataEventArgs args)
     {
@@ -139,43 +138,35 @@ public class SkipVersionCheck : TerrariaPlugin
         int playerIndex = args.Msg.whoAmI;
         _clientVersions[playerIndex] = clientRelease;
 
-        // If version matches server, let vanilla handle it normally.
+        // If version matches server, nothing to do.
         if (clientRelease == Main.curRelease)
         {
             _clientVersions[playerIndex] = -1; // same as server
-            TShock.Log.ConsoleInfo(
-                $"[SkipVersionCheck] Client (index {playerIndex}) version " +
-                $"{clientVersion} matches server. Passing through.");
             return;
         }
 
-        // --- BYPASS the version check entirely ---
+        // --- REWRITE the version in the buffer to match the server ---
+        // This lets TShock's connect handler run normally (SSC init, auth, etc.)
+        // instead of us bypassing it with args.Handled = true.
+        string serverVersion = "Terraria" + Main.curRelease;
+        byte[] serverVersionBytes = Encoding.UTF8.GetBytes(serverVersion);
+
+        int offset = args.Index;
+        // BinaryWriter string format: [7-bit encoded length][string bytes]
+        // For strings < 128 chars, length is 1 byte.
+        args.Msg.readBuffer[offset] = (byte)serverVersionBytes.Length;
+        Buffer.BlockCopy(serverVersionBytes, 0, args.Msg.readBuffer, offset + 1, serverVersionBytes.Length);
+
         string label = KnownVersions.TryGetValue(clientRelease, out string? ver)
             ? ver : $"release {clientRelease}";
 
         TShock.Log.ConsoleInfo(
-            $"[SkipVersionCheck] Bypassing version check for client (index {playerIndex}) " +
-            $"{clientVersion} ({label}). Server curRelease={Main.curRelease}.");
+            $"[SkipVersionCheck] Rewrote client (index {playerIndex}) version " +
+            $"from {clientVersion} ({label}) to {serverVersion}. " +
+            $"TShock will handle connect normally.");
 
-        if (Netplay.ServerPassword != null && Netplay.ServerPassword.Length > 0)
-        {
-            Netplay.Clients[playerIndex].State = 1;
-            NetMessage.SendData(37, playerIndex);
-            TShock.Log.ConsoleInfo(
-                $"[SkipVersionCheck] Password required. Sent password request to client {playerIndex}.");
-        }
-        else
-        {
-            Netplay.Clients[playerIndex].State = 1;
-            NetMessage.SendData(3, playerIndex);
-            TShock.Log.ConsoleInfo(
-                $"[SkipVersionCheck] No password. Sent ContinueConnecting to client {playerIndex}.");
-        }
-
-        args.Handled = true;
+        // Do NOT set args.Handled — let TShock process the rewritten packet.
     }
-
-
 
     /// <summary>
     /// Filter dropped items with IDs the server doesn't recognize.
@@ -204,37 +195,6 @@ public class SkipVersionCheck : TerrariaPlugin
             args.Msg.readBuffer[typeOffset] = 0;
             args.Msg.readBuffer[typeOffset + 1] = 0;
         }
-    }
-
-
-
-    // ───────────────────── Outgoing packets (server → client) ─────────────────────
-
-    /// <summary>
-    /// Intercept outgoing packets to filter unsupported items being sent to
-    /// clients that are on an older version than the server.
-    /// </summary>
-    private void OnSendData(SendDataEventArgs args)
-    {
-        if (args.Handled)
-            return;
-
-        // For broadcast packets (remoteClient == -1), we can't easily filter
-        // per-client. For targeted packets, check if the target is a cross-version
-        // client on an older version that might not know about newer items.
-        // 
-        // The NetSendData hook fires before the packet is serialized, so we only have
-        // access to the high-level parameters (number, number2, etc.), not the raw
-        // byte buffer. For item packets, the item type is typically in one of the
-        // number parameters, but the exact mapping depends on how NetMessage.SendData
-        // serializes each packet type.
-        //
-        // Since the server is on v1.4.5.3 (older) and clients may be on v1.4.5.5
-        // (newer), the server won't send items the client doesn't know about because
-        // the server simply doesn't have those items. So outgoing filtering is only
-        // needed if the SERVER is on the newer version, which would be unusual.
-        //
-        // For now, we primarily rely on incoming filtering (client → server).
     }
 
     // ───────────────────── Helpers ─────────────────────
