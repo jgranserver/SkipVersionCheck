@@ -75,7 +75,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with full protocol translation for cross-version play.";
-    public override Version Version => new(2, 7, 0);
+    public override Version Version => new(2, 8, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
@@ -222,6 +222,18 @@ public class SkipVersionCheck : TerrariaPlugin
         TShock.Log.ConsoleInfo(
             $"[SkipVersionCheck] Cross-version client (index {playerIndex}) " +
             $"{clientVersion} ({label}) connecting to server {Main.curRelease}.");
+
+        // --- Step 0: Create TSPlayer (replicating TShock's OnConnect) ---
+        // TShock.OnConnect creates a TSPlayer and stores it in Players[].
+        // Without this, TShock.OnGetData rejects ALL subsequent packets
+        // because Players[who] is null. This is the root cause of SSC not syncing.
+        var player = new TSPlayer(playerIndex);
+        TShock.Players[playerIndex] = player;
+
+        // Ban checks are handled by TShock's OnJoin handler which still fires.
+
+        TShock.Log.ConsoleInfo(
+            $"[SkipVersionCheck] Created TSPlayer for cross-version client {playerIndex}.");
 
         // --- Step 1: Set connection state ---
         Netplay.Clients[playerIndex].State = 1;
