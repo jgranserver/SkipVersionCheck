@@ -18,9 +18,6 @@ namespace SkipVersionCheck;
 [ApiVersion(2, 1)]
 public class SkipVersionCheck : TerrariaPlugin
 {
-    // Accept any client with release >= this value.
-    private const int MinSupportedRelease = 269;
-
     // Friendly labels for logging.
     private static readonly Dictionary<int, string> KnownVersions = new()
     {
@@ -67,6 +64,9 @@ public class SkipVersionCheck : TerrariaPlugin
     // The server's max item ID.
     private int _serverMaxItemId;
 
+    // Plugin config.
+    private PluginConfig _config = new();
+
     // Singleton instance for NetModuleHandler to access.
     public static SkipVersionCheck? Instance { get; private set; }
 
@@ -75,7 +75,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with full protocol translation for cross-version play.";
-    public override Version Version => new(2, 8, 0);
+    public override Version Version => new(2, 9, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
@@ -85,14 +85,33 @@ public class SkipVersionCheck : TerrariaPlugin
 
     public override void Initialize()
     {
+        _config = PluginConfig.Load();
+
         // Hook NetManager for outgoing NetModule packet filtering
         On.Terraria.Net.NetManager.Broadcast_NetPacket_int += NetModuleHandler.OnBroadcast;
         On.Terraria.Net.NetManager.SendToClient += NetModuleHandler.OnSendToClient;
 
         // Hook incoming packets (run first to intercept before TShock)
         ServerApi.Hooks.NetGetData.Register(this, OnGetData, int.MinValue);
+        // Late handler runs AFTER TShock's handlers — blocks vanilla for cross-version PlayerInfo
+        ServerApi.Hooks.NetGetData.Register(this, OnGetDataLate, int.MaxValue);
         ServerApi.Hooks.GamePostInitialize.Register(this, OnPostInitialize);
         ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
+
+        if (_config.DebugLogging)
+        {
+            // Diagnostic: log outgoing packets during connection
+            ServerApi.Hooks.NetSendData.Register(this, OnSendData, int.MinValue);
+            // Diagnostic: log ServerJoin (fires when CC2 arrives)
+            ServerApi.Hooks.ServerJoin.Register(this, OnServerJoin, int.MinValue);
+        }
+
+        // Register reload command
+        Commands.ChatCommands.Add(new Command("skipversioncheck.admin", ReloadCommand,
+            "svcreload")
+        {
+            HelpText = "Reloads the SkipVersionCheck configuration."
+        });
     }
 
     protected override void Dispose(bool disposing)
@@ -103,10 +122,24 @@ public class SkipVersionCheck : TerrariaPlugin
             On.Terraria.Net.NetManager.SendToClient -= NetModuleHandler.OnSendToClient;
 
             ServerApi.Hooks.NetGetData.Deregister(this, OnGetData);
+            ServerApi.Hooks.NetGetData.Deregister(this, OnGetDataLate);
             ServerApi.Hooks.GamePostInitialize.Deregister(this, OnPostInitialize);
             ServerApi.Hooks.ServerLeave.Deregister(this, OnLeave);
+            ServerApi.Hooks.NetSendData.Deregister(this, OnSendData);
+            ServerApi.Hooks.ServerJoin.Deregister(this, OnServerJoin);
+
+            Commands.ChatCommands.RemoveAll(c =>
+                c.Names.Contains("svcreload"));
         }
         base.Dispose(disposing);
+    }
+
+    private void ReloadCommand(CommandArgs args)
+    {
+        _config = PluginConfig.Load();
+        args.Player.SendSuccessMessage(
+            "[SkipVersionCheck] Configuration reloaded. " +
+            $"DebugLogging={_config.DebugLogging}, MinSupportedRelease={_config.MinSupportedRelease}");
     }
 
     private void OnPostInitialize(EventArgs args)
@@ -121,6 +154,9 @@ public class SkipVersionCheck : TerrariaPlugin
             .Append("[SkipVersionCheck] Whitelisted versions: ")
             .Append(string.Join(", ", KnownVersions.Values));
 
+        if (_config.DebugLogging)
+            sb.Append("\n[SkipVersionCheck] Debug logging is ENABLED.");
+
         TShock.Log.ConsoleInfo(sb.ToString());
     }
 
@@ -128,11 +164,55 @@ public class SkipVersionCheck : TerrariaPlugin
     {
         if (args.Who >= 0 && args.Who < _clientVersions.Length)
         {
+            int wasVersion = _clientVersions[args.Who];
             _clientVersions[args.Who] = 0;
+            if (wasVersion > 0 && _config.DebugLogging)
+            {
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] Cross-version client {args.Who} " +
+                    $"(release {wasVersion}) disconnected.");
+            }
         }
     }
 
-    // ───────── Public accessors for NetModuleHandler ─────────
+    // ───────────── Debug-only hooks ─────────────
+
+    /// <summary>
+    /// Diagnostic: logs when ContinueConnecting2(8) fires InvokeServerJoin.
+    /// Only registered when DebugLogging is enabled.
+    /// </summary>
+    private void OnServerJoin(JoinEventArgs args)
+    {
+        int who = args.Who;
+        if (who >= 0 && who < 256 && IsCrossVersionClient(who))
+        {
+            TShock.Log.ConsoleInfo(
+                $"[SkipVersionCheck] DEBUG ServerJoin: client={who}, " +
+                $"state={Netplay.Clients[who].State}, " +
+                $"handled={args.Handled}");
+        }
+    }
+
+    /// <summary>
+    /// Diagnostic: logs outgoing packets to cross-version clients in connection phase.
+    /// Only registered when DebugLogging is enabled.
+    /// </summary>
+    private void OnSendData(SendDataEventArgs args)
+    {
+        int target = args.remoteClient;
+        if (target >= 0 && target < 256)
+        {
+            var clientState = Netplay.Clients[target].State;
+            if (clientState < 10 && IsCrossVersionClient(target))
+            {
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] DEBUG SEND pkt={args.MsgId}({(int)args.MsgId}) " +
+                    $"to={target} state={clientState}");
+            }
+        }
+    }
+
+    // ───────────── Public accessors for NetModuleHandler ─────────────
 
     /// <summary>Get the stored version for a connected client.</summary>
     public int GetClientVersion(int playerIndex)
@@ -155,6 +235,22 @@ public class SkipVersionCheck : TerrariaPlugin
         if (args.Handled)
             return;
 
+        // Debug: log all packets from clients in connection phase
+        if (_config.DebugLogging)
+        {
+            int debugWho = args.Msg.whoAmI;
+            if (debugWho >= 0 && debugWho < 256)
+            {
+                var clientState = Netplay.Clients[debugWho].State;
+                if (clientState < 10)
+                {
+                    TShock.Log.ConsoleInfo(
+                        $"[SkipVersionCheck] DEBUG RECV pkt={args.MsgID}({(int)args.MsgID}) " +
+                        $"client={debugWho} state={clientState}");
+                }
+            }
+        }
+
         switch (args.MsgID)
         {
             case PacketTypes.ConnectRequest:
@@ -172,13 +268,96 @@ public class SkipVersionCheck : TerrariaPlugin
     }
 
     /// <summary>
-    /// Bypass the version check for cross-version clients by manually handling
-    /// the connection handshake. We replicate what vanilla Terraria does:
-    /// 1. Set connection state to 1
-    /// 2. Construct a proper ConnectRequest packet with the server's version
-    ///    using PacketFactory and copy it into the buffer
-    /// 3. Send password request or continue-connecting packet
-    /// 4. Mark packet as handled so vanilla doesn't reject the version
+    /// Late handler (int.MaxValue priority) — runs AFTER TShock's handlers.
+    /// For cross-version clients, blocks vanilla's case 4 (PlayerInfo) from running
+    /// and sends WorldInfo to unblock the client's handshake.
+    /// </summary>
+    private void OnGetDataLate(GetDataEventArgs args)
+    {
+        if (args.Handled)
+            return;
+
+        if (args.MsgID != PacketTypes.PlayerInfo)
+            return;
+
+        int who = args.Msg.whoAmI;
+        if (!IsCrossVersionClient(who))
+            return;
+
+        // Block vanilla's case 4 from running — it doesn't handle cross-version
+        // clients correctly since we bypassed case 1 (ConnectRequest).
+        args.Handled = true;
+
+        // Ensure the player name is set on Main.player[who].
+        // TShock's HandlePlayerInfo should have run (priority 0, before us),
+        // but we verify and fix it as a safety net.
+        string currentName = Main.player[who]?.name ?? "";
+
+        if (string.IsNullOrEmpty(currentName))
+        {
+            try
+            {
+                using (var ms = new MemoryStream(args.Msg.readBuffer, args.Index, args.Length - 1))
+                using (var br = new BinaryReader(ms))
+                {
+                    br.ReadByte();   // playerid
+                    br.ReadByte();   // skinVariant
+                    br.ReadByte();   // voiceVariant  (v1.4.5.5)
+                    br.ReadSingle(); // voicePitchOffset (v1.4.5.5)
+                    br.ReadByte();   // hair
+                    string name = br.ReadString(); // name (7-bit length-prefixed)
+
+                    if (!string.IsNullOrEmpty(name) && Main.player[who] != null)
+                    {
+                        Main.player[who].name = name;
+                        TShock.Log.ConsoleInfo(
+                            $"[SkipVersionCheck] Fixed blank player name -> '{name}' for client {who}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                TShock.Log.ConsoleError(
+                    $"[SkipVersionCheck] Error reading player name from buffer: {ex.Message}");
+            }
+        }
+
+        if (_config.DebugLogging)
+        {
+            string nameForLog = Main.player[who]?.name ?? "(null)";
+            TShock.Log.ConsoleInfo(
+                $"[SkipVersionCheck] DEBUG OnGetDataLate: blocked vanilla case 4, " +
+                $"client={who}, name='{nameForLog}', state={Netplay.Clients[who].State}");
+        }
+
+        // The v1.4.5.5 client waits for WorldInfo after PlayerInfo before sending
+        // any more packets. Advance state and send WorldInfo to unblock the client.
+        if (Netplay.Clients[who].State == 1)
+        {
+            Netplay.Clients[who].State = 2;
+            NetMessage.SendData((int)PacketTypes.WorldInfo, who);
+
+            if (_config.DebugLogging)
+            {
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] DEBUG Sent WorldInfo(7) to client {who}, " +
+                    $"state now={Netplay.Clients[who].State}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Bypass the version check for cross-version clients.
+    ///
+    /// Execution order in HookManager.InvokeNetGetData for ConnectRequest:
+    ///   1. InvokeServerConnect fires → TShock.OnConnect creates TSPlayer
+    ///   2. NetGetData.Invoke fires → THIS handler runs
+    ///   3. If args.Handled, vanilla processing is skipped
+    ///
+    /// We skip vanilla (which would reject the version) and manually set
+    /// the connection state + send ContinueConnecting. TShock's own
+    /// HandleConnecting (on packet 8) handles password prompts and login.
+    /// We do NOT create a TSPlayer — TShock already did in step 1.
     /// </summary>
     private void HandleConnectRequest(GetDataEventArgs args)
     {
@@ -197,11 +376,14 @@ public class SkipVersionCheck : TerrariaPlugin
             return;
 
         // Below minimum — let vanilla reject it.
-        if (clientRelease < MinSupportedRelease)
+        if (clientRelease < _config.MinSupportedRelease)
         {
-            TShock.Log.ConsoleInfo(
-                $"[SkipVersionCheck] Client (index {args.Msg.whoAmI}) version " +
-                $"{clientVersion} (release {clientRelease}) is below minimum {MinSupportedRelease}. Rejecting.");
+            if (_config.DebugLogging)
+            {
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] Client (index {args.Msg.whoAmI}) version " +
+                    $"{clientVersion} (release {clientRelease}) below minimum {_config.MinSupportedRelease}.");
+            }
             return;
         }
 
@@ -223,50 +405,22 @@ public class SkipVersionCheck : TerrariaPlugin
             $"[SkipVersionCheck] Cross-version client (index {playerIndex}) " +
             $"{clientVersion} ({label}) connecting to server {Main.curRelease}.");
 
-        // --- Step 0: Create TSPlayer (replicating TShock's OnConnect) ---
-        // TShock.OnConnect creates a TSPlayer and stores it in Players[].
-        // Without this, TShock.OnGetData rejects ALL subsequent packets
-        // because Players[who] is null. This is the root cause of SSC not syncing.
-        var player = new TSPlayer(playerIndex);
-        TShock.Players[playerIndex] = player;
-
-        // Ban checks are handled by TShock's OnJoin handler which still fires.
-
-        TShock.Log.ConsoleInfo(
-            $"[SkipVersionCheck] Created TSPlayer for cross-version client {playerIndex}.");
-
-        // --- Step 1: Set connection state ---
+        // TShock's OnConnect already created TSPlayer via ServerConnect hook.
+        // Set connection state manually (vanilla would have done this).
         Netplay.Clients[playerIndex].State = 1;
 
-        // --- Step 2: Construct a ConnectRequest with the server's version ---
-        // Use PacketFactory to build a proper packet matching the Crossplay approach.
-        byte[] connectRequest = new PacketFactory()
-            .SetType(1) // PacketTypes.ConnectRequest
-            .PackString($"Terraria{Main.curRelease}")
-            .GetByteData();
+        // Send ContinueConnecting with the correct player slot index.
+        NetMessage.SendData((int)PacketTypes.ContinueConnecting, playerIndex, -1,
+            null, playerIndex);
 
-        // Copy the rewritten packet into the buffer at the packet header start
-        Buffer.BlockCopy(connectRequest, 0, args.Msg.readBuffer, args.Index - 3, connectRequest.Length);
-
-        TShock.Log.ConsoleInfo(
-            $"[SkipVersionCheck] Rewrote packet buffer: {clientVersion} => Terraria{Main.curRelease} " +
-            $"({connectRequest.Length} bytes at offset {args.Index - 3}).");
-
-        // --- Step 3: Send continue-connecting ---
-        if (Netplay.ServerPassword != null && Netplay.ServerPassword.Length > 0)
+        if (_config.DebugLogging)
         {
-            NetMessage.SendData(37, playerIndex);
             TShock.Log.ConsoleInfo(
-                $"[SkipVersionCheck] Password required. Sent password request to client {playerIndex}.");
-        }
-        else
-        {
-            NetMessage.SendData(3, playerIndex);
-            TShock.Log.ConsoleInfo(
-                $"[SkipVersionCheck] No password. Sent ContinueConnecting to client {playerIndex}.");
+                $"[SkipVersionCheck] DEBUG Sent ContinueConnecting(3) to client {playerIndex}, " +
+                $"state={Netplay.Clients[playerIndex].State}");
         }
 
-        // --- Step 4: Bypass vanilla processing ---
+        // Skip vanilla processing (which would reject the version mismatch).
         args.Handled = true;
     }
 
@@ -308,6 +462,9 @@ public class SkipVersionCheck : TerrariaPlugin
                 gameModeFlags &= 247;
             }
         }
+
+        // WorldInfo send and vanilla blocking is handled in OnGetDataLate
+        // (int.MaxValue priority) after TShock finishes processing PlayerInfo.
     }
 
     /// <summary>
@@ -328,8 +485,11 @@ public class SkipVersionCheck : TerrariaPlugin
 
         if (itemType >= _serverMaxItemId)
         {
-            TShock.Log.ConsoleDebug(
-                $"[SkipVersionCheck] Filtered unsupported item {itemType} from client {who} (ItemDrop)");
+            if (_config.DebugLogging)
+            {
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] DEBUG Filtered unsupported item {itemType} from client {who}");
+            }
             args.Msg.readBuffer[typeOffset] = 0;
             args.Msg.readBuffer[typeOffset + 1] = 0;
         }
