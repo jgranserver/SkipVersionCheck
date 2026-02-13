@@ -3,6 +3,7 @@ using System.Text;
 
 using Terraria;
 using Terraria.ID;
+using Terraria.Net.Sockets;
 using TerrariaApi.Server;
 
 using TShockAPI;
@@ -58,6 +59,11 @@ public class SkipVersionCheck : TerrariaPlugin
         { 318, 6145 },
     };
 
+    // Protocol version thresholds for packet format changes.
+    // Spawn packet (12) added numberOfDeathsPVE, numberOfDeathsPVP, team
+    // fields starting in release 316 (v1.4.5.3).
+    private const int SpawnPacketV2Release = 316;
+
     // Track each client's release number. -1 = same as server, 0 = not connected.
     private readonly int[] _clientVersions = new int[Main.maxPlayers + 1];
 
@@ -75,7 +81,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with full protocol translation for cross-version play.";
-    public override Version Version => new(2, 9, 0);
+    public override Version Version => new(2, 10, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
@@ -98,10 +104,11 @@ public class SkipVersionCheck : TerrariaPlugin
         ServerApi.Hooks.GamePostInitialize.Register(this, OnPostInitialize);
         ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
 
+        // Outgoing packet translation (always active) + debug logging
+        ServerApi.Hooks.NetSendData.Register(this, OnSendData, int.MinValue);
+
         if (_config.DebugLogging)
         {
-            // Diagnostic: log outgoing packets during connection
-            ServerApi.Hooks.NetSendData.Register(this, OnSendData, int.MinValue);
             // Diagnostic: log ServerJoin (fires when CC2 arrives)
             ServerApi.Hooks.ServerJoin.Register(this, OnServerJoin, int.MinValue);
         }
@@ -194,21 +201,36 @@ public class SkipVersionCheck : TerrariaPlugin
     }
 
     /// <summary>
-    /// Diagnostic: logs outgoing packets to cross-version clients in connection phase.
-    /// Only registered when DebugLogging is enabled.
+    /// Outgoing packet handler: translates packets for cross-version clients.
+    /// Also logs outgoing packets in debug mode.
     /// </summary>
     private void OnSendData(SendDataEventArgs args)
     {
-        int target = args.remoteClient;
-        if (target >= 0 && target < 256)
+        if (args.Handled)
+            return;
+
+        // Debug logging for cross-version clients in connection phase
+        if (_config.DebugLogging)
         {
-            var clientState = Netplay.Clients[target].State;
-            if (clientState < 10 && IsCrossVersionClient(target))
+            int target = args.remoteClient;
+            if (target >= 0 && target < 256)
             {
-                TShock.Log.ConsoleInfo(
-                    $"[SkipVersionCheck] DEBUG SEND pkt={args.MsgId}({(int)args.MsgId}) " +
-                    $"to={target} state={clientState}");
+                var clientState = Netplay.Clients[target].State;
+                if (clientState < 10 && IsCrossVersionClient(target))
+                {
+                    TShock.Log.ConsoleInfo(
+                        $"[SkipVersionCheck] DEBUG SEND pkt={args.MsgId}({(int)args.MsgId}) " +
+                        $"to={target} state={clientState}");
+                }
             }
+        }
+
+        // Translate outgoing packets for cross-version clients
+        switch (args.MsgId)
+        {
+            case PacketTypes.PlayerSpawn:
+                HandleOutgoingSpawnPacket(args);
+                break;
         }
     }
 
@@ -259,6 +281,10 @@ public class SkipVersionCheck : TerrariaPlugin
 
             case PacketTypes.PlayerInfo:
                 HandlePlayerInfo(args);
+                break;
+
+            case PacketTypes.PlayerSpawn:
+                HandleIncomingSpawnPacket(args);
                 break;
 
             case PacketTypes.ItemDrop:
@@ -495,8 +521,169 @@ public class SkipVersionCheck : TerrariaPlugin
         }
     }
 
+    // ───────────── Outgoing packet translation ─────────────
+
+    /// <summary>
+    /// Translates outgoing spawn packet (12) for cross-version clients.
+    /// v1.4.5.5 (release 318) added numberOfDeathsPVE, numberOfDeathsPVP, and team
+    /// fields that older clients don't understand. We strip these fields
+    /// and send the packet in the old format.
+    /// </summary>
+    private void HandleOutgoingSpawnPacket(SendDataEventArgs args)
+    {
+        // number = player index, number2 = spawn context
+        int playerIndex = args.number;
+        if (playerIndex < 0 || playerIndex >= Main.maxPlayers)
+            return;
+
+        Player player = Main.player[playerIndex];
+        if (player == null)
+            return;
+
+        // Build the old-format spawn packet (without death counters + team)
+        byte[] oldPacket = new PacketFactory()
+            .SetType(12)
+            .PackByte((byte)playerIndex)
+            .PackInt16((short)player.SpawnX)
+            .PackInt16((short)player.SpawnY)
+            .PackInt32(player.respawnTimer)
+            .PackByte((byte)args.number2) // spawnContext
+            .GetByteData();
+
+        // Determine which clients need the translated packet
+        int remoteClient = args.remoteClient;
+        int ignoreClient = args.ignoreClient;
+        bool anyCrossVersion = false;
+
+        if (remoteClient >= 0 && remoteClient < 256)
+        {
+            // Targeted send to a single client
+            if (NeedsSpawnTranslation(remoteClient))
+            {
+                SendRawPacket(remoteClient, oldPacket);
+                args.Handled = true;
+                anyCrossVersion = true;
+            }
+        }
+        else
+        {
+            // Broadcast: check if any connected cross-version client needs translation
+            for (int i = 0; i < Main.maxPlayers; i++)
+            {
+                if (i == ignoreClient || !Netplay.Clients[i].IsConnected())
+                    continue;
+
+                if (NeedsSpawnTranslation(i))
+                {
+                    SendRawPacket(i, oldPacket);
+                    anyCrossVersion = true;
+                }
+            }
+
+            // If we sent to any cross-version clients, we need to handle this carefully.
+            // We can't set Handled = true because native clients still need the normal packet.
+            // The native clients will get the normal packet through default processing.
+            // But cross-version clients will get a duplicate if we don't suppress.
+            // Solution: Only suppress if ALL connected targets are cross-version.
+            if (anyCrossVersion)
+            {
+                bool allCrossVersion = true;
+                for (int i = 0; i < Main.maxPlayers; i++)
+                {
+                    if (i == ignoreClient || !Netplay.Clients[i].IsConnected())
+                        continue;
+                    if (!NeedsSpawnTranslation(i))
+                    {
+                        allCrossVersion = false;
+                        break;
+                    }
+                }
+                if (allCrossVersion)
+                    args.Handled = true;
+            }
+        }
+
+        if (anyCrossVersion && _config.DebugLogging)
+        {
+            TShock.Log.ConsoleInfo(
+                $"[SkipVersionCheck] Translated outgoing spawn packet for player {playerIndex}, " +
+                $"handled={args.Handled}");
+        }
+    }
+
+    /// <summary>
+    /// Handles incoming spawn packets from cross-version clients.
+    /// Older clients send a shorter packet without numberOfDeathsPVE,
+    /// numberOfDeathsPVP, and team. We pad the buffer so vanilla can
+    /// process it normally.
+    /// </summary>
+    private void HandleIncomingSpawnPacket(GetDataEventArgs args)
+    {
+        int who = args.Msg.whoAmI;
+        if (!NeedsSpawnTranslation(who))
+            return;
+
+        // Old format: [byte playerid][short SpawnX][short SpawnY][int respawnTimer][byte context]
+        //           = 1 + 2 + 2 + 4 + 1 = 10 bytes payload
+        // New format: [byte playerid][short SpawnX][short SpawnY][int respawnTimer]
+        //             [short deathsPVE][short deathsPVP][byte team][byte context]
+        //           = 1 + 2 + 2 + 4 + 2 + 2 + 1 + 1 = 15 bytes payload
+        int payloadLen = args.Length - 1; // subtract msg type byte
+        int expectedOldLen = 10;
+        int expectedNewLen = 15;
+
+        if (payloadLen >= expectedNewLen)
+            return; // Already new format, let vanilla handle it
+
+        if (payloadLen < expectedOldLen)
+            return; // Malformed packet, let vanilla reject it
+
+        try
+        {
+            int offset = args.Index;
+
+            // Read the old format fields
+            byte playerId = args.Msg.readBuffer[offset];
+            short spawnX = BitConverter.ToInt16(args.Msg.readBuffer, offset + 1);
+            short spawnY = BitConverter.ToInt16(args.Msg.readBuffer, offset + 3);
+            int respawnTimer = BitConverter.ToInt32(args.Msg.readBuffer, offset + 5);
+            byte spawnContext = args.Msg.readBuffer[offset + 9];
+
+            // Read the player's current team (fallback to 0)
+            byte team = 0;
+            if (who >= 0 && who < Main.maxPlayers && Main.player[who] != null)
+                team = (byte)Main.player[who].team;
+
+            // Rewrite the buffer in new format:
+            // [byte playerid][short SpawnX][short SpawnY][int respawnTimer]
+            // [short deathsPVE=0][short deathsPVP=0][byte team][byte context]
+            args.Msg.readBuffer[offset] = playerId;
+            BitConverter.GetBytes(spawnX).CopyTo(args.Msg.readBuffer, offset + 1);
+            BitConverter.GetBytes(spawnY).CopyTo(args.Msg.readBuffer, offset + 3);
+            BitConverter.GetBytes(respawnTimer).CopyTo(args.Msg.readBuffer, offset + 5);
+            BitConverter.GetBytes((short)0).CopyTo(args.Msg.readBuffer, offset + 9);  // numberOfDeathsPVE
+            BitConverter.GetBytes((short)0).CopyTo(args.Msg.readBuffer, offset + 11); // numberOfDeathsPVP
+            args.Msg.readBuffer[offset + 13] = team;        // team
+            args.Msg.readBuffer[offset + 14] = spawnContext; // context
+
+            if (_config.DebugLogging)
+            {
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] Padded incoming spawn packet from client {who}: " +
+                    $"spawn=({spawnX},{spawnY}), respawnTimer={respawnTimer}, " +
+                    $"team={team}, context={spawnContext}");
+            }
+        }
+        catch (Exception ex)
+        {
+            TShock.Log.ConsoleError(
+                $"[SkipVersionCheck] Error translating incoming spawn packet from client {who}: {ex.Message}");
+        }
+    }
+
     // ───────────────────── Helpers ─────────────────────
 
+    /// <summary>Check if a client is a cross-version client.</summary>
     private bool IsCrossVersionClient(int playerIndex)
     {
         if (playerIndex < 0 || playerIndex >= _clientVersions.Length)
@@ -504,5 +691,42 @@ public class SkipVersionCheck : TerrariaPlugin
 
         int ver = _clientVersions[playerIndex];
         return ver > 0 && ver != Main.curRelease;
+    }
+
+    /// <summary>
+    /// Check if a client needs spawn packet translation.
+    /// Returns true for cross-version clients with a release below the
+    /// threshold where the new spawn packet format was introduced.
+    /// </summary>
+    private bool NeedsSpawnTranslation(int playerIndex)
+    {
+        if (playerIndex < 0 || playerIndex >= _clientVersions.Length)
+            return false;
+
+        int ver = _clientVersions[playerIndex];
+        return ver > 0 && ver < SpawnPacketV2Release;
+    }
+
+    /// <summary>Send raw packet bytes to a specific client.</summary>
+    private static void SendRawPacket(int clientIndex, byte[] data)
+    {
+        if (clientIndex < 0 || clientIndex >= 256)
+            return;
+
+        var client = Netplay.Clients[clientIndex];
+        if (client?.Socket == null || !client.IsConnected())
+            return;
+
+        try
+        {
+            client.Socket.AsyncSend(
+                data, 0, data.Length,
+                new SocketSendCallback(client.ServerWriteCallBack));
+        }
+        catch (Exception ex)
+        {
+            TShock.Log.ConsoleError(
+                $"[SkipVersionCheck] Error sending raw packet to client {clientIndex}: {ex.Message}");
+        }
     }
 }
