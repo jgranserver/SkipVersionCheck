@@ -20,10 +20,10 @@ public class PluginConfig
     /// <summary>
     /// Minimum supported client release number.
     /// Clients below this version will be rejected.
-    /// Default: 269 (v1.4.4).
+    /// Default: 315 (v1.4.5.0).
     /// </summary>
     [JsonProperty("MinSupportedRelease")]
-    public int MinSupportedRelease { get; set; } = 269;
+    public int MinSupportedRelease { get; set; } = 315;
 
     private static string ConfigPath => Path.Combine(TShock.SavePath, "SkipVersionCheck.json");
 

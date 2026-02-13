@@ -22,17 +22,6 @@ public class SkipVersionCheck : TerrariaPlugin
     // Friendly labels for logging.
     private static readonly Dictionary<int, string> KnownVersions = new()
     {
-        { 269, "v1.4.4" },
-        { 270, "v1.4.4.1" },
-        { 271, "v1.4.4.2" },
-        { 272, "v1.4.4.3" },
-        { 273, "v1.4.4.4" },
-        { 274, "v1.4.4.5" },
-        { 275, "v1.4.4.6" },
-        { 276, "v1.4.4.7" },
-        { 277, "v1.4.4.8" },
-        { 278, "v1.4.4.8.1" },
-        { 279, "v1.4.4.9" },
         { 315, "v1.4.5.0" },
         { 316, "v1.4.5.3" },
         { 317, "v1.4.5.5" },
@@ -42,17 +31,6 @@ public class SkipVersionCheck : TerrariaPlugin
     // Max item IDs per release version (for outgoing packet filtering).
     private static readonly Dictionary<int, int> MaxItems = new()
     {
-        { 269, 5453 },
-        { 270, 5453 },
-        { 271, 5453 },
-        { 272, 5453 },
-        { 273, 5453 },
-        { 274, 5456 },
-        { 275, 5456 },
-        { 276, 5456 },
-        { 277, 5456 },
-        { 278, 5456 },
-        { 279, 5456 },
         { 315, 6145 },
         { 316, 6145 },
         { 317, 6145 },
