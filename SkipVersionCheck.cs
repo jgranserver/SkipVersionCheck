@@ -59,7 +59,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with full protocol translation for cross-version play.";
-    public override Version Version => new(2, 10, 0);
+    public override Version Version => new(2, 11, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
@@ -325,6 +325,48 @@ public class SkipVersionCheck : TerrariaPlugin
                     $"[SkipVersionCheck] Error reading player name from buffer: {ex.Message}");
             }
         }
+        // --- Extract extraAccessory (Demon Heart) from the cross-version packet ---
+        // TShock's HandlePlayerInfo can't parse cross-version packets (ReceivedInfo
+        // stays False), so we extract extraAccessory here where we know the code runs.
+        try
+        {
+            using (var ms2 = new MemoryStream(args.Msg.readBuffer, args.Index, args.Length - 1))
+            using (var br2 = new BinaryReader(ms2))
+            {
+                br2.ReadByte();   // playerid
+                br2.ReadByte();   // skinVariant
+                br2.ReadByte();   // voiceVariant
+                br2.ReadSingle(); // voicePitchOffset
+                br2.ReadByte();   // hair
+                string parsedName = br2.ReadString(); // name
+                br2.ReadByte();   // hairDye
+                br2.ReadUInt16(); // hideVisualFlags
+                br2.ReadByte();   // hideMisc
+                br2.ReadBytes(21); // 7 colors × 3 bytes
+
+                byte extraFlags = br2.ReadByte();
+                bool clientExtraAccessory = (extraFlags & 4) != 0; // bit 2
+                bool serverExtraAccessory = Main.player[who]?.extraAccessory ?? false;
+
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] PlayerInfo parse: client={who} ('{parsedName}') " +
+                    $"extraFlags=0x{extraFlags:X2} clientExtraAccessory={clientExtraAccessory} " +
+                    $"serverExtraAccessory={serverExtraAccessory}");
+
+                // Demon Heart is permanent — only allow false → true
+                if (clientExtraAccessory && Main.player[who] != null && !Main.player[who].extraAccessory)
+                {
+                    Main.player[who].extraAccessory = true;
+                    TShock.Log.ConsoleInfo(
+                        $"[SkipVersionCheck] Demon Heart extra slot ACTIVATED for client {who}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            TShock.Log.ConsoleError(
+                $"[SkipVersionCheck] Error parsing extraAccessory for client {who}: {ex.Message}");
+        }
 
         if (_config.DebugLogging)
         {
@@ -431,6 +473,8 @@ public class SkipVersionCheck : TerrariaPlugin
     /// <summary>
     /// Handle PlayerInfo packet for cross-version compatibility.
     /// Fixes journey mode flag so cross-version clients match the server's game mode.
+    /// Also extracts extraAccessory (Demon Heart) from the packet since TShock's
+    /// HandlePlayerInfo can't parse cross-version packets (ReceivedInfo stays False).
     /// </summary>
     private void HandlePlayerInfo(GetDataEventArgs args)
     {
@@ -438,6 +482,7 @@ public class SkipVersionCheck : TerrariaPlugin
         if (!IsCrossVersionClient(who))
             return;
 
+        // --- Journey mode fix (existing logic) ---
         int flagsIndex = args.Index + args.Length - 1;
         if (flagsIndex < 0 || flagsIndex >= args.Msg.readBuffer.Length)
             return;
@@ -465,6 +510,53 @@ public class SkipVersionCheck : TerrariaPlugin
                     $"[SkipVersionCheck] Disabled journey mode flag for cross-version client {who}");
                 gameModeFlags &= 247;
             }
+        }
+
+        // --- Extract extraAccessory (Demon Heart) from the packet ---
+        // TShock's HandlePlayerInfo can't parse cross-version PlayerInfo packets
+        // (ReceivedInfo stays False), so we extract key flags here.
+        // v1.4.5.5 PlayerInfo layout after type byte:
+        //   byte playerid, byte skinVariant, byte voiceVariant, float voicePitchOffset,
+        //   byte hair, string name (7-bit len), byte hairDye, ushort hideVisualFlags,
+        //   byte hideMisc, 7×3 color bytes (21 bytes), byte extraFlags, ...
+        // extraFlags bit 2 = extraAccessory (Demon Heart)
+        try
+        {
+            using var ms = new MemoryStream(args.Msg.readBuffer, args.Index, args.Length - 1);
+            using var br = new BinaryReader(ms);
+
+            br.ReadByte();   // playerid
+            br.ReadByte();   // skinVariant
+            br.ReadByte();   // voiceVariant
+            br.ReadSingle(); // voicePitchOffset
+            br.ReadByte();   // hair
+            string parsedName = br.ReadString(); // name (7-bit length-prefixed)
+            br.ReadByte();   // hairDye
+            br.ReadUInt16(); // hideVisualFlags
+            br.ReadByte();   // hideMisc
+            br.ReadBytes(21); // 7 colors × 3 bytes each
+
+            byte extraFlags = br.ReadByte();
+            bool extraAccessory = (extraFlags & 4) != 0; // bit 2
+
+            TShock.Log.ConsoleInfo(
+                $"[SkipVersionCheck] PlayerInfo from client {who} ('{parsedName}'): " +
+                $"extraFlags=0x{extraFlags:X2} extraAccessory={extraAccessory} " +
+                $"current TPlayer.extraAccessory={Main.player[who]?.extraAccessory}");
+
+            // Demon Heart is a permanent, irreversible upgrade.
+            // Only allow false → true, never downgrade.
+            if (extraAccessory && Main.player[who] != null && !Main.player[who].extraAccessory)
+            {
+                Main.player[who].extraAccessory = true;
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] Demon Heart extra slot ACTIVATED for client {who}");
+            }
+        }
+        catch (Exception ex)
+        {
+            TShock.Log.ConsoleError(
+                $"[SkipVersionCheck] Error parsing PlayerInfo extraAccessory for client {who}: {ex.Message}");
         }
 
         // WorldInfo send and vanilla blocking is handled in OnGetDataLate
