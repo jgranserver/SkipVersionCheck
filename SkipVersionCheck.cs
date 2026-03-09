@@ -1,6 +1,8 @@
 using System.IO;
 using System.Text;
 
+using Microsoft.Xna.Framework;
+
 using Terraria;
 using Terraria.ID;
 using Terraria.Net.Sockets;
@@ -59,7 +61,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with full protocol translation for cross-version play.";
-    public override Version Version => new(2, 11, 0);
+    public override Version Version => new(2, 12, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
@@ -292,81 +294,10 @@ public class SkipVersionCheck : TerrariaPlugin
         // clients correctly since we bypassed case 1 (ConnectRequest).
         args.Handled = true;
 
-        // Ensure the player name is set on Main.player[who].
-        // TShock's HandlePlayerInfo should have run (priority 0, before us),
-        // but we verify and fix it as a safety net.
-        string currentName = Main.player[who]?.name ?? "";
-
-        if (string.IsNullOrEmpty(currentName))
-        {
-            try
-            {
-                using (var ms = new MemoryStream(args.Msg.readBuffer, args.Index, args.Length - 1))
-                using (var br = new BinaryReader(ms))
-                {
-                    br.ReadByte();   // playerid
-                    br.ReadByte();   // skinVariant
-                    br.ReadByte();   // voiceVariant  (v1.4.5.5)
-                    br.ReadSingle(); // voicePitchOffset (v1.4.5.5)
-                    br.ReadByte();   // hair
-                    string name = br.ReadString(); // name (7-bit length-prefixed)
-
-                    if (!string.IsNullOrEmpty(name) && Main.player[who] != null)
-                    {
-                        Main.player[who].name = name;
-                        TShock.Log.ConsoleInfo(
-                            $"[SkipVersionCheck] Fixed blank player name -> '{name}' for client {who}");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                TShock.Log.ConsoleError(
-                    $"[SkipVersionCheck] Error reading player name from buffer: {ex.Message}");
-            }
-        }
-        // --- Extract extraAccessory (Demon Heart) from the cross-version packet ---
-        // TShock's HandlePlayerInfo can't parse cross-version packets (ReceivedInfo
-        // stays False), so we extract extraAccessory here where we know the code runs.
-        try
-        {
-            using (var ms2 = new MemoryStream(args.Msg.readBuffer, args.Index, args.Length - 1))
-            using (var br2 = new BinaryReader(ms2))
-            {
-                br2.ReadByte();   // playerid
-                br2.ReadByte();   // skinVariant
-                br2.ReadByte();   // voiceVariant
-                br2.ReadSingle(); // voicePitchOffset
-                br2.ReadByte();   // hair
-                string parsedName = br2.ReadString(); // name
-                br2.ReadByte();   // hairDye
-                br2.ReadUInt16(); // hideVisualFlags
-                br2.ReadByte();   // hideMisc
-                br2.ReadBytes(21); // 7 colors × 3 bytes
-
-                byte extraFlags = br2.ReadByte();
-                bool clientExtraAccessory = (extraFlags & 4) != 0; // bit 2
-                bool serverExtraAccessory = Main.player[who]?.extraAccessory ?? false;
-
-                TShock.Log.ConsoleInfo(
-                    $"[SkipVersionCheck] PlayerInfo parse: client={who} ('{parsedName}') " +
-                    $"extraFlags=0x{extraFlags:X2} clientExtraAccessory={clientExtraAccessory} " +
-                    $"serverExtraAccessory={serverExtraAccessory}");
-
-                // Demon Heart is permanent — only allow false → true
-                if (clientExtraAccessory && Main.player[who] != null && !Main.player[who].extraAccessory)
-                {
-                    Main.player[who].extraAccessory = true;
-                    TShock.Log.ConsoleInfo(
-                        $"[SkipVersionCheck] Demon Heart extra slot ACTIVATED for client {who}");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            TShock.Log.ConsoleError(
-                $"[SkipVersionCheck] Error parsing extraAccessory for client {who}: {ex.Message}");
-        }
+        // Parse and apply all PlayerInfo fields (appearance + extraAccessory)
+        // for this cross-version client. TShock's HandlePlayerInfo can't parse
+        // cross-version packets (ReceivedInfo stays False), so we do it here.
+        ApplyPlayerInfoFields(who, args.Msg.readBuffer, args.Index, args.Length);
 
         if (_config.DebugLogging)
         {
@@ -512,52 +443,11 @@ public class SkipVersionCheck : TerrariaPlugin
             }
         }
 
-        // --- Extract extraAccessory (Demon Heart) from the packet ---
-        // TShock's HandlePlayerInfo can't parse cross-version PlayerInfo packets
-        // (ReceivedInfo stays False), so we extract key flags here.
-        // v1.4.5.5 PlayerInfo layout after type byte:
-        //   byte playerid, byte skinVariant, byte voiceVariant, float voicePitchOffset,
-        //   byte hair, string name (7-bit len), byte hairDye, ushort hideVisualFlags,
-        //   byte hideMisc, 7×3 color bytes (21 bytes), byte extraFlags, ...
-        // extraFlags bit 2 = extraAccessory (Demon Heart)
-        try
-        {
-            using var ms = new MemoryStream(args.Msg.readBuffer, args.Index, args.Length - 1);
-            using var br = new BinaryReader(ms);
-
-            br.ReadByte();   // playerid
-            br.ReadByte();   // skinVariant
-            br.ReadByte();   // voiceVariant
-            br.ReadSingle(); // voicePitchOffset
-            br.ReadByte();   // hair
-            string parsedName = br.ReadString(); // name (7-bit length-prefixed)
-            br.ReadByte();   // hairDye
-            br.ReadUInt16(); // hideVisualFlags
-            br.ReadByte();   // hideMisc
-            br.ReadBytes(21); // 7 colors × 3 bytes each
-
-            byte extraFlags = br.ReadByte();
-            bool extraAccessory = (extraFlags & 4) != 0; // bit 2
-
-            TShock.Log.ConsoleInfo(
-                $"[SkipVersionCheck] PlayerInfo from client {who} ('{parsedName}'): " +
-                $"extraFlags=0x{extraFlags:X2} extraAccessory={extraAccessory} " +
-                $"current TPlayer.extraAccessory={Main.player[who]?.extraAccessory}");
-
-            // Demon Heart is a permanent, irreversible upgrade.
-            // Only allow false → true, never downgrade.
-            if (extraAccessory && Main.player[who] != null && !Main.player[who].extraAccessory)
-            {
-                Main.player[who].extraAccessory = true;
-                TShock.Log.ConsoleInfo(
-                    $"[SkipVersionCheck] Demon Heart extra slot ACTIVATED for client {who}");
-            }
-        }
-        catch (Exception ex)
-        {
-            TShock.Log.ConsoleError(
-                $"[SkipVersionCheck] Error parsing PlayerInfo extraAccessory for client {who}: {ex.Message}");
-        }
+        // Apply all PlayerInfo fields (appearance + extraAccessory).
+        // Also runs in OnGetDataLate, but we call it here too because
+        // HandlePlayerInfo fires first (int.MinValue) and sets up flags
+        // before TShock's handler runs at priority 0.
+        ApplyPlayerInfoFields(who, args.Msg.readBuffer, args.Index, args.Length);
 
         // WorldInfo send and vanilla blocking is handled in OnGetDataLate
         // (int.MaxValue priority) after TShock finishes processing PlayerInfo.
@@ -749,6 +639,135 @@ public class SkipVersionCheck : TerrariaPlugin
             TShock.Log.ConsoleError(
                 $"[SkipVersionCheck] Error translating incoming spawn packet from client {who}: {ex.Message}");
         }
+    }
+
+    // ───────────── Cross-version PlayerInfo parser ─────────────
+
+    /// <summary>
+    /// Parses and applies all fields from a cross-version PlayerInfo (packet 4)
+    /// buffer to Main.player[who]. This covers appearance fields (skinVariant,
+    /// hair, hairDye, colors, voiceVariant, voicePitchOffset), name, and
+    /// extraAccessory (Demon Heart). Required because TShock's HandlePlayerInfo
+    /// can't parse cross-version packets, and KeepPlayerAppearance depends on
+    /// the client's appearance data being populated on TPlayer.
+    ///
+    /// v1.4.5.5 PlayerInfo layout after the message type byte:
+    ///   byte   playerId
+    ///   byte   skinVariant
+    ///   byte   voiceVariant      (added in v1.4.5.5)
+    ///   float  voicePitchOffset  (added in v1.4.5.5)
+    ///   byte   hair
+    ///   string name              (7-bit length-prefixed)
+    ///   byte   hairDye
+    ///   ushort hideVisualFlags
+    ///   byte   hideMisc
+    ///   Color  hairColor         (3 bytes: R, G, B)
+    ///   Color  skinColor         (3 bytes)
+    ///   Color  eyeColor          (3 bytes)
+    ///   Color  shirtColor        (3 bytes)
+    ///   Color  underShirtColor   (3 bytes)
+    ///   Color  pantsColor        (3 bytes)
+    ///   Color  shoeColor         (3 bytes)
+    ///   byte   extraFlags        (bit 2 = extraAccessory / Demon Heart)
+    ///   ...remaining fields (difficulty, torches, etc.)
+    /// </summary>
+    private void ApplyPlayerInfoFields(int who, byte[] readBuffer, int index, int length)
+    {
+        if (who < 0 || who >= Main.maxPlayers || Main.player[who] == null)
+            return;
+
+        try
+        {
+            using var ms = new MemoryStream(readBuffer, index, length - 1);
+            using var br = new BinaryReader(ms);
+
+            Player player = Main.player[who];
+
+            br.ReadByte();                           // playerId (skip)
+            byte skinVariant    = br.ReadByte();     // skinVariant
+            byte voiceVariant   = br.ReadByte();     // voiceVariant
+            float voicePitch    = br.ReadSingle();   // voicePitchOffset
+            byte hair           = br.ReadByte();     // hair
+            string name         = br.ReadString();   // name (7-bit length-prefixed)
+            byte hairDye        = br.ReadByte();     // hairDye
+            ushort hideFlags    = br.ReadUInt16();   // hideVisualFlags
+            byte hideMisc       = br.ReadByte();     // hideMisc
+
+            // 7 colors × 3 bytes each (R, G, B)
+            Color hairColor       = ReadColor(br);
+            Color skinColor       = ReadColor(br);
+            Color eyeColor        = ReadColor(br);
+            Color shirtColor      = ReadColor(br);
+            Color underShirtColor = ReadColor(br);
+            Color pantsColor      = ReadColor(br);
+            Color shoeColor       = ReadColor(br);
+
+            byte extraFlags = br.ReadByte();
+            bool extraAccessory = (extraFlags & 4) != 0; // bit 2
+
+            // --- Apply appearance fields ---
+            player.skinVariant      = skinVariant;
+            player.voiceVariant     = voiceVariant;
+            player.voicePitchOffset = voicePitch;
+            player.hair             = hair;
+            player.hairDye         = hairDye;
+            player.hairColor       = hairColor;
+            player.skinColor       = skinColor;
+            player.eyeColor        = eyeColor;
+            player.shirtColor      = shirtColor;
+            player.underShirtColor = underShirtColor;
+            player.pantsColor      = pantsColor;
+            player.shoeColor       = shoeColor;
+
+            // Apply name if not already set
+            if (!string.IsNullOrEmpty(name) && string.IsNullOrEmpty(player.name))
+            {
+                player.name = name;
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] Fixed blank player name -> '{name}' for client {who}");
+            }
+
+            // Apply hideVisibleAccessory flags
+            for (int i = 0; i < player.hideVisibleAccessory.Length && i < 16; i++)
+            {
+                player.hideVisibleAccessory[i] = (hideFlags & (1 << i)) != 0;
+            }
+
+            // Apply hideMisc flags
+            player.hideMisc = hideMisc;
+
+            // Demon Heart is permanent — only allow false → true
+            bool serverExtraAccessory = player.extraAccessory;
+            if (extraAccessory && !serverExtraAccessory)
+            {
+                player.extraAccessory = true;
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] Demon Heart extra slot ACTIVATED for client {who}");
+            }
+
+            if (_config.DebugLogging)
+            {
+                TShock.Log.ConsoleInfo(
+                    $"[SkipVersionCheck] PlayerInfo applied: client={who} ('{name}') " +
+                    $"skin={skinVariant} hair={hair} hairDye={hairDye} " +
+                    $"voice={voiceVariant} pitch={voicePitch:F2} " +
+                    $"extraFlags=0x{extraFlags:X2} extraAccessory={extraAccessory}");
+            }
+        }
+        catch (Exception ex)
+        {
+            TShock.Log.ConsoleError(
+                $"[SkipVersionCheck] Error parsing PlayerInfo for client {who}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Reads 3 bytes (R, G, B) as a Color from the stream.</summary>
+    private static Color ReadColor(BinaryReader br)
+    {
+        byte r = br.ReadByte();
+        byte g = br.ReadByte();
+        byte b = br.ReadByte();
+        return new Color(r, g, b);
     }
 
     // ───────────────────── Helpers ─────────────────────
