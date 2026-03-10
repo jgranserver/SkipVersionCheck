@@ -25,7 +25,7 @@ public class PluginConfig
     [JsonProperty("MinSupportedRelease")]
     public int MinSupportedRelease { get; set; } = 315;
 
-    private static string ConfigPath => Path.Combine(TShock.SavePath, "SkipVersionCheck.json");
+    private static string ConfigPath => Path.Combine(TShock.SavePath ?? "tshock", "SkipVersionCheck.json");
 
     public static PluginConfig Load()
     {

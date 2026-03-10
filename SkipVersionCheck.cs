@@ -53,6 +53,9 @@ public class SkipVersionCheck : TerrariaPlugin
     // Plugin config.
     private PluginConfig _config = new();
 
+    // Whether MonoMod hooks were successfully registered.
+    private bool _monoModAvailable;
+
     // Singleton instance for NetModuleHandler to access.
     public static SkipVersionCheck? Instance { get; private set; }
 
@@ -61,7 +64,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with full protocol translation for cross-version play.";
-    public override Version Version => new(2, 12, 0);
+    public override Version Version => new(2, 13, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {
@@ -73,9 +76,20 @@ public class SkipVersionCheck : TerrariaPlugin
     {
         _config = PluginConfig.Load();
 
-        // Hook NetManager for outgoing NetModule packet filtering
-        On.Terraria.Net.NetManager.Broadcast_NetPacket_int += NetModuleHandler.OnBroadcast;
-        On.Terraria.Net.NetManager.SendToClient += NetModuleHandler.OnSendToClient;
+        // Hook NetManager for outgoing NetModule packet filtering (requires MonoMod)
+        try
+        {
+            On.Terraria.Net.NetManager.Broadcast_NetPacket_int += NetModuleHandler.OnBroadcast;
+            On.Terraria.Net.NetManager.SendToClient += NetModuleHandler.OnSendToClient;
+            _monoModAvailable = true;
+        }
+        catch (Exception ex) when (ex is TypeLoadException or MissingMethodException or FileNotFoundException or FileLoadException)
+        {
+            _monoModAvailable = false;
+            TShock.Log.ConsoleWarn(
+                "[SkipVersionCheck] MonoMod hooks unavailable — outgoing NetModule " +
+                $"packet filtering is DISABLED. Reason: {ex.GetType().Name}: {ex.Message}");
+        }
 
         // Hook incoming packets (run first to intercept before TShock)
         ServerApi.Hooks.NetGetData.Register(this, OnGetData, int.MinValue);
@@ -105,8 +119,11 @@ public class SkipVersionCheck : TerrariaPlugin
     {
         if (disposing)
         {
-            On.Terraria.Net.NetManager.Broadcast_NetPacket_int -= NetModuleHandler.OnBroadcast;
-            On.Terraria.Net.NetManager.SendToClient -= NetModuleHandler.OnSendToClient;
+            if (_monoModAvailable)
+            {
+                On.Terraria.Net.NetManager.Broadcast_NetPacket_int -= NetModuleHandler.OnBroadcast;
+                On.Terraria.Net.NetManager.SendToClient -= NetModuleHandler.OnSendToClient;
+            }
 
             ServerApi.Hooks.NetGetData.Deregister(this, OnGetData);
             ServerApi.Hooks.NetGetData.Deregister(this, OnGetDataLate);
