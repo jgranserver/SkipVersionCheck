@@ -64,11 +64,11 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with full protocol translation for cross-version play.";
-    public override Version Version => new(2, 13, 0);
+    public override Version Version => new(2, 13, 1);
 
     public SkipVersionCheck(Main game) : base(game)
     {
-        Order = -1;
+        Order = 1;
         Instance = this;
     }
 

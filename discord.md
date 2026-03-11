@@ -28,8 +28,7 @@ Future versions are automatically accepted — no plugin update required.
 
 ## Installation
 
-1. Build the plugin: `dotnet build -c Release`
-2. Copy `bin/Release/net9.0/SkipVersionCheck.dll` into your TShock `ServerPlugins` folder.
+1. Download the plugin dll: https://github.com/jgranserver/SkipVersionCheck/releases
+2. Copy `SkipVersionCheck.dll` into your TShock `ServerPlugins` folder.
 3. Restart the server.
 
-https://github.com/jgranserver/SkipVersionCheck/releases
