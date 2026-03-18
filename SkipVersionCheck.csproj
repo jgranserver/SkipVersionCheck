@@ -3,9 +3,9 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>2.13.1</Version>
+    <Version>2.14.0</Version>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="TShock" Version="6.0.0" />
+    <PackageReference Include="TShock" Version="6.1.0" />
   </ItemGroup>
 </Project>

@@ -28,6 +28,7 @@ public class SkipVersionCheck : TerrariaPlugin
         { 316, "v1.4.5.3" },
         { 317, "v1.4.5.5" },
         { 318, "v1.4.5.5" },
+        { 319, "v1.4.5.6" },
     };
 
     // Max item IDs per release version (for outgoing packet filtering).
@@ -37,6 +38,7 @@ public class SkipVersionCheck : TerrariaPlugin
         { 316, 6145 },
         { 317, 6145 },
         { 318, 6145 },
+        { 319, 6147 },   // +2 items: Music Box (Rainbow Boulder)=6145, Music Box (Silence)=6146
     };
 
     // Protocol version thresholds for packet format changes.
@@ -64,7 +66,7 @@ public class SkipVersionCheck : TerrariaPlugin
     public override string Description =>
         "Allows compatible Terraria clients to connect regardless of exact patch version, " +
         "with full protocol translation for cross-version play.";
-    public override Version Version => new(2, 13, 1);
+    public override Version Version => new(2, 14, 0);
 
     public SkipVersionCheck(Main game) : base(game)
     {

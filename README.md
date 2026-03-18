@@ -31,7 +31,9 @@ Any Terraria release ≥ 269, including:
 | 315     | v1.4.5.0  |
 | 316     | v1.4.5.3  |
 | 317     | v1.4.5.5  |
-| 318+    | v1.4.5.5+ |
+| 318     | v1.4.5.5  |
+| 319     | v1.4.5.6  |
+| 320+    | future    |
 
 Future versions are automatically accepted — no plugin update required.
 
@@ -43,7 +45,7 @@ Future versions are automatically accepted — no plugin update required.
 
 ## Requirements
 
-- TShock 5.x / 6.0.0+ (for Terraria 1.4.4+)
+- TShock 6.1.0+ (for Terraria 1.4.5.6)
 - .NET 9.0
 
 ## Limitations
