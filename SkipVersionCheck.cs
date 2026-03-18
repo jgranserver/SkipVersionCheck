@@ -363,8 +363,10 @@ public class SkipVersionCheck : TerrariaPlugin
         }
 
         if (!clientVersion.StartsWith("Terraria"))
+        {
+           args.Handled = true;
             return;
-
+        }
         string releaseStr = clientVersion.Substring(8);
         if (!int.TryParse(releaseStr, out int clientRelease))
             return;
